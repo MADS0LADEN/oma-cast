@@ -41,6 +41,19 @@ var frecencyMigrations = [
   }
 ]
 
+// ECB-backed USD rates (frankfurter.app), refreshed at most once per day.
+var currenciesMigrations = [{
+  version: 1,
+  name: "currencies",
+  up: function(doc) {
+    doc.base = "USD"
+    doc.rates = { USD: 1 }   // code -> units per 1 USD
+    doc.fetchedAt = 0        // unix ms
+    doc.source = "frankfurter"
+    return doc
+  }
+}]
+
 var SEARCH_HISTORY_LIMIT = 20   // [I]
 
 function pushSearchHistory(history, query) {
@@ -54,7 +67,8 @@ function pushSearchHistory(history, query) {
 
 var documents = {
   settings: { file: "settings.json", migrations: settingsMigrations },
-  frecency: { file: "frecency.json", migrations: frecencyMigrations }
+  frecency: { file: "frecency.json", migrations: frecencyMigrations },
+  currencies: { file: "currencies.json", migrations: currenciesMigrations }
 }
 
 // Host flags in $XDG_CONFIG_HOME/oma-cast/config.json: user-editable and
@@ -80,6 +94,7 @@ if (typeof module !== "undefined") {
   module.exports = {
     settingsMigrations: settingsMigrations,
     frecencyMigrations: frecencyMigrations,
+    currenciesMigrations: currenciesMigrations,
     pushSearchHistory: pushSearchHistory,
     SEARCH_HISTORY_LIMIT: SEARCH_HISTORY_LIMIT,
     documents: documents,

@@ -138,6 +138,34 @@ function rankOptions(ctx) {
   return { sensitivity: ctx.sensitivity || "medium", nowMs: ctx.nowMs }
 }
 
+function calculatorCandidate(evalResult) {
+  return {
+    id: "calculator:" + evalResult.expression,
+    type: "command",
+    kind: "calculator",
+    title: evalResult.result,
+    subtitle: evalResult.expression,
+    typeLabel: "Calculator",
+    glyph: "󰃬",
+    copyText: evalResult.copyText,
+    calcKind: evalResult.kind,
+    rootSearch: { when: "searching" }
+  }
+}
+
+function calculatorSection(query, ctx, deps) {
+  var q = String(query || "").trim()
+  if (!q || !deps.Calculator) return null
+  var rates = (ctx && ctx.currencyRates) || {}
+  var evalResult = deps.Calculator.tryEvaluate(q, rates)
+  if (!evalResult) return null
+  return {
+    id: "calculator",
+    title: "Calculator",
+    rows: [{ candidate: calculatorCandidate(evalResult), record: null }]
+  }
+}
+
 function fallbackRows(query) {
   return FALLBACKS.map(function(f) {
     return {
@@ -166,6 +194,8 @@ function rootSections(candidates, query, ctx, deps) {
     var searchable = decorated.filter(function(c) { return c.rootSearch.when !== "empty" })
     var results = deps.Ranker.rank(searchable, q, opts)
     var sections = []
+    var calc = calculatorSection(q, ctx, deps)
+    if (calc) sections.push(calc)
     if (results.length > 0) sections.push({ id: "results", title: "Results", rows: results })
     sections.push({ id: "fallback-commands", title: "Use “" + q + "” with…", rows: fallbackRows(q) })
     return sections
@@ -215,6 +245,12 @@ function submenuSections(candidates, menuId, query, ctx, deps) {
 // Actions for a row (SPEC §10.2 action panel, §10.3 shortcuts). The first is
 // primary (↵), the second secondary (Ctrl ↵).
 function actionsFor(candidate) {
+  if (candidate.kind === "calculator") {
+    return [
+      { id: "copy-result", title: "Copy Result", shortcut: "↵", section: "primary", icon: "" },
+      { id: "paste-result", title: "Paste Result", shortcut: "Ctrl ↵", section: "primary", icon: "" }
+    ]
+  }
   var primary
   var list = []
   switch (candidate.kind) {
@@ -281,6 +317,8 @@ if (typeof module !== "undefined") {
     menuCandidates: menuCandidates,
     builtinCandidate: builtinCandidate,
     decorate: decorate,
+    calculatorCandidate: calculatorCandidate,
+    calculatorSection: calculatorSection,
     rootSections: rootSections,
     submenuSections: submenuSections,
     actionsFor: actionsFor,

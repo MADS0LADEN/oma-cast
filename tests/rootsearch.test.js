@@ -3,9 +3,10 @@ const assert = require("node:assert/strict")
 const Ranker = require("../plugin/core/Ranker.js")
 const Frecency = require("../plugin/core/Frecency.js")
 const OmarchyMenu = require("../plugin/core/OmarchyMenu.js")
+const Calculator = require("../plugin/core/Calculator.js")
 const RS = require("../plugin/core/RootSearch.js")
 
-const deps = { Ranker, Frecency, OmarchyMenu }
+const deps = { Ranker, Frecency, OmarchyMenu, Calculator }
 const NOW = Date.UTC(2026, 9, 19, 12)
 
 const apps = ["firefox", "chromium", "signal-desktop", "org.gnome.Nautilus", "Alacritty", "libreoffice-writer"].map((id) => ({
@@ -44,6 +45,26 @@ test("fir finds Firefox first (Phase 1 accept)", () => {
   const sections = results("fir")
   assert.equal(sections[0].id, "results")
   assert.equal(titles(sections[0])[0], "Firefox")
+})
+
+test("2+2 shows calculator section before results", () => {
+  const sections = results("2+2")
+  assert.equal(sections[0].id, "calculator")
+  assert.equal(titles(sections[0])[0], "4")
+  assert.equal(sections[0].rows[0].candidate.kind, "calculator")
+  assert.equal(sections[0].rows[0].candidate.copyText, "4")
+})
+
+test("100 usd to eur uses currency rates from context", () => {
+  const sections = results("100 usd to eur", ctx({ currencyRates: { USD: 1, EUR: 0.9 } }))
+  assert.equal(sections[0].id, "calculator")
+  assert.equal(titles(sections[0])[0], "90 EUR")
+  assert.equal(sections[0].rows[0].candidate.calcKind, "currency")
+})
+
+test("calculator actions: copy and paste only", () => {
+  const ids = RS.actionsFor({ kind: "calculator" }).map((a) => a.id)
+  assert.deepEqual(ids, ["copy-result", "paste-result"])
 })
 
 test("a query always ends with the fallback section", () => {

@@ -122,7 +122,8 @@ Works:
   - A launch from root clears the query [I].
   - A row is selected on hover only after a real pointer move (Omarchy's PointerMoveGate).
 - **Latency:** show → mapped in 37–44 ms, hide in 9–25 ms (`tests/smoke.sh`).
-- **Tests:** 65 unit tests (`node --test tests/`).
+- **Tests:** 65+ unit tests (`node --test tests/`).
+- **Calculator:** inline math and currency conversion in root search (Enter copies result, Ctrl+Enter pastes via `omarchy-clipboard-paste-text`); rates cached in `currencies.json` (frankfurter).
 
 Stubbed / not yet:
 - Keystroke buffering before the surface maps. Keys sent within ~40 ms of the hotkey go to the window underneath.

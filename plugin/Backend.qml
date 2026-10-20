@@ -9,6 +9,7 @@ import "core/Schema.js" as Schema
 import "core/Ranker.js" as Ranker
 import "core/Frecency.js" as Frecency
 import "core/OmarchyMenu.js" as OmarchyMenu
+import "core/Calculator.js" as Calculator
 import "core/RootSearch.js" as RootSearch
 import "services"
 
@@ -33,7 +34,7 @@ Item {
 
   readonly property var registry: Rpc.createRegistry()
   readonly property double startedAt: Date.now()
-  readonly property var deps: ({ Ranker: Ranker, Frecency: Frecency, OmarchyMenu: OmarchyMenu })
+  readonly property var deps: ({ Ranker: Ranker, Frecency: Frecency, OmarchyMenu: OmarchyMenu, Calculator: Calculator })
 
   // Every root-search candidate, rebuilt when a provider changes.
   property var candidates: []
@@ -98,8 +99,16 @@ Item {
       commands: settingsStore.loaded ? settingsStore.doc.commands : ({}),
       frecency: frecencyStore.loaded ? frecencyStore.doc.items : ({}),
       nowMs: Date.now(),
-      sensitivity: settingsStore.loaded ? settingsStore.doc.general.rootSearchSensitivity : "medium"
+      sensitivity: settingsStore.loaded ? settingsStore.doc.general.rootSearchSensitivity : "medium",
+      currencyRates: currencyRates.ratesMap()
     }
+  }
+
+  function calculatorEval(data) {
+    var id = String(data && data.id || "")
+    if (id.indexOf("calculator:") !== 0) return null
+    var query = String(data && data.query || "").trim()
+    return Calculator.tryEvaluate(query, currencyRates.ratesMap())
   }
 
   function decorated(id) {
@@ -157,6 +166,19 @@ Item {
     var id = String(data && data.id || "")
     var action = String(data && data.action || "open")
     var query = String(data && data.query || "").trim()
+    var calcEval = backend.calculatorEval(data)
+    if (calcEval) {
+      var text = String(calcEval.copyText || "")
+      if (action === "open" || action === "copy-result") {
+        Util.execArgv(["wl-copy", "--", text])
+        return { close: true, hud: "Copied to Clipboard" }
+      }
+      if (action === "paste-result") {
+        Util.execArgv(["omarchy-clipboard-paste-text", text])
+        return { close: true }
+      }
+      throw new Error("Unknown action " + action)
+    }
     var candidate = backend.decorated(id)
     if (!candidate) throw new Error("Unknown command " + id)
 
@@ -304,6 +326,13 @@ Item {
       }
     })
 
+    Rpc.register(backend.registry, "calculator", {
+      calculate: function(data) {
+        return Calculator.tryEvaluate(String(data && data.query || ""), currencyRates.ratesMap())
+      },
+      refreshCurrencies: function() { currencyRates.refresh(); return null }
+    })
+
     Rpc.register(backend.registry, "rootSearch", {
       // {query, view?: {kind:"menu", menuId}} -> sections of plain rows.
       search: function(data) {
@@ -318,7 +347,9 @@ Item {
         })
       },
       getActions: function(data) {
-        var candidate = backend.decorated(String(data && data.id || ""))
+        var rowId = String(data && data.id || "")
+        if (rowId.indexOf("calculator:") === 0) return RootSearch.actionsFor({ kind: "calculator" })
+        var candidate = backend.decorated(rowId)
         if (!candidate) {
           var fallback = RootSearch.FALLBACKS.filter(function(f) { return f.id === data.id })[0]
           if (!fallback) throw new Error("Unknown command " + (data && data.id))
@@ -405,11 +436,20 @@ Item {
     onMessage: function(level, text, metadata) { backend.log(level, "store", text, metadata) }
   }
 
+  CurrencyRates {
+    id: currencyRates
+    ready: backend.directoriesReady
+    path: backend.paths.db + "/" + Schema.documents.currencies.file
+    onMessage: function(level, text, metadata) { backend.log(level, "currencies", text, metadata) }
+  }
+
   // Bumped whenever ranking inputs change, so views re-query.
-  readonly property int dataRevision: candidatesRevision + (settingsStore.loaded ? 1 : 0) + (frecencyStore.loaded ? 1 : 0)
+  readonly property int dataRevision: candidatesRevision + (settingsStore.loaded ? 1 : 0) + (frecencyStore.loaded ? 1 : 0) + currencyRatesRevision
   property int storeRevision: 0
+  property int currencyRatesRevision: 0
   Connections { target: settingsStore; function onChanged() { backend.storeRevision++ } }
   Connections { target: frecencyStore; function onChanged() { backend.storeRevision++ } }
+  Connections { target: currencyRates; function onChanged() { backend.currencyRatesRevision++ } }
 
   // config.json is optional and hand-edited; it hot-reloads on save.
   FileView {
