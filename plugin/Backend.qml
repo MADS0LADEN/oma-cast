@@ -11,6 +11,7 @@ import "core/Frecency.js" as Frecency
 import "core/OmarchyMenu.js" as OmarchyMenu
 import "core/Calculator.js" as Calculator
 import "core/RootSearch.js" as RootSearch
+import "core/FileSearch.js" as FileSearch
 import "services"
 
 // The clone's backend, in-process (SPEC §2.0). It owns the paths, the host
@@ -40,7 +41,7 @@ Item {
   property var candidates: []
   property var candidatesById: ({})
   property int candidatesRevision: 0
-  readonly property bool loading: menuSource.loading
+  readonly property bool loading: menuSource.loading || fileSource.loading
 
   signal notification(string method, var data)
 
@@ -111,14 +112,46 @@ Item {
     return ctx
   }
 
+  // Last calculator rows from rootSearch.search, keyed by id and by query.
+  // Needed because Enter must copy even when the Rust peek cache briefly misses.
+  property var ephemeralCalcById: ({})
+  property var ephemeralCalcByQuery: ({})
+
+  function rememberCalc(query, candidate) {
+    if (!candidate || candidate.kind !== "calculator") return
+    var q = String(query || "").trim()
+    var byId = Object.assign({}, backend.ephemeralCalcById)
+    byId[candidate.id] = candidate
+    backend.ephemeralCalcById = byId
+    if (q) {
+      var byQ = Object.assign({}, backend.ephemeralCalcByQuery)
+      byQ[q] = candidate
+      backend.ephemeralCalcByQuery = byQ
+    }
+  }
+
+  // Resolve a calculator result for an action. Prefers the row we just showed.
   function calculatorEval(data) {
     var id = String(data && data.id || "")
-    if (id.indexOf("calculator:") !== 0) return null
     var query = String(data && data.query || "").trim()
+    if (id.indexOf("calculator:") === 0 && backend.ephemeralCalcById[id])
+      return backend.ephemeralCalcById[id]
+    if (query && backend.ephemeralCalcByQuery[query])
+      return backend.ephemeralCalcByQuery[query]
+    if (id.indexOf("calculator:") !== 0) return null
     var peeked = calcEngine.peek(query)
-    if (peeked !== undefined) return peeked
-    calcEngine.evaluate(query, currencyRates.ratesMap())
-    return calcEngine.peek(query) || null
+    if (peeked) return peeked
+    var expression = id.slice("calculator:".length)
+    peeked = calcEngine.peek(expression)
+    if (peeked) return peeked
+    if (peeked === null) return null
+    calcEngine.evaluate(query || expression, currencyRates.ratesMap())
+    return calcEngine.peek(query || expression) || null
+  }
+
+  function copyCalcText(text) {
+    Util.execArgv(["wl-copy", "--", String(text || "")])
+    return { close: true, hud: "Copied to Clipboard" }
   }
 
   function decorated(id) {
@@ -178,11 +211,9 @@ Item {
     var query = String(data && data.query || "").trim()
     var calcEval = backend.calculatorEval(data)
     if (calcEval) {
-      var text = String(calcEval.copyText || "")
-      if (action === "open" || action === "copy-result") {
-        Util.execArgv(["wl-copy", "--", text])
-        return { close: true, hud: "Copied to Clipboard" }
-      }
+      var text = String(calcEval.copyText || calcEval.result || "")
+      if (action === "open" || action === "copy-result")
+        return backend.copyCalcText(text)
       if (action === "paste-result") {
         Util.execArgv(["omarchy-clipboard-paste-text", text])
         return { close: true }
@@ -214,6 +245,7 @@ Item {
           return { push: { kind: "menu", menuId: target.id, title: target.label } }
         case "builtin":
           backend.recordVisit(id, query)
+          if (candidate.run.push) return { push: candidate.run.push }
           if (candidate.run.summon) backend.summonPlugin(candidate.run.summon, candidate.run.payload || "{}")
           return { close: true }
         case "fallback":
@@ -262,6 +294,30 @@ Item {
     throw new Error("Unknown action " + action)
   }
 
+  // A file or folder row (core/FileSearch.js); see RootSearch.fileActions.
+  function performFileAction(candidate, action) {
+    var path = candidate.path
+    var folder = candidate.kind === "folder" ? path : path.slice(0, path.lastIndexOf("/")) || "/"
+    switch (action) {
+      case "open":
+        Util.execArgv(["uwsm-app", "--", "xdg-open", path])
+        return { close: true }
+      case "reveal":
+        // FileManager1 selects the item in Nautilus (or whichever file manager owns the name).
+        Util.execArgv(["gdbus", "call", "--session", "--dest", "org.freedesktop.FileManager1",
+          "--object-path", "/org/freedesktop/FileManager1", "--method", "org.freedesktop.FileManager1.ShowItems",
+          "['" + FileSearch.fileUri(path).replace(/'/g, "%27") + "']", ""])
+        return { close: true }
+      case "open-terminal":
+        Util.execArgv(["uwsm-app", "--", "xdg-terminal-exec", "--dir=" + folder])
+        return { close: true }
+      case "copy-path":
+        Util.execArgv(["wl-copy", "--", path])
+        return { close: true, hud: "Copied Path" }
+    }
+    throw new Error("Unknown action " + action)
+  }
+
   // ------------------------------------------------------------- services
 
   function registerServices() {
@@ -297,21 +353,25 @@ Item {
     Rpc.register(backend.registry, "settings", {
       getGeneralSettings: function() {
         if (!settingsStore.loaded) throw new Error("settings not loaded")
-        return settingsStore.doc.general
+        return Schema.withGeneralDefaults(settingsStore.doc.general)
       },
-      // Partial update; only known keys with a matching type are accepted.
+      // Partial update; only known keys with a matching type (and, for
+      // ranged numbers, an allowed value) are accepted.
       updateGeneralSettings: function(data) {
         if (!settingsStore.loaded) throw new Error("settings not loaded")
         if (settingsStore.readOnly) throw new Error("settings are read-only: " + (settingsStore.lastError || "written by a newer build"))
         var patch = data && typeof data === "object" ? data : {}
-        var current = settingsStore.doc.general
+        var current = Schema.withGeneralDefaults(settingsStore.doc.general)
         for (var key in patch) {
           if (current[key] === undefined) throw new Error("Unknown general setting " + key)
           if (typeof patch[key] !== typeof current[key]) throw new Error("Setting " + key + " must be a " + typeof current[key])
+          var problem = Schema.checkGeneralValue(key, patch[key])
+          if (problem) throw new Error(problem)
         }
         settingsStore.update(function(doc) { for (var k in patch) doc.general[k] = patch[k] })
-        backend.emit("settings.generalSettingsChanged", settingsStore.doc.general)
-        return settingsStore.doc.general
+        var general = Schema.withGeneralDefaults(settingsStore.doc.general)
+        backend.emit("settings.generalSettingsChanged", general)
+        return general
       },
       getAllCommandSettings: function() { return settingsStore.doc.commands },
       getCommandSettings: function(data) { return settingsStore.doc.commands[String(data && data.commandId || "")] || {} },
@@ -341,11 +401,34 @@ Item {
       // null once; a follow-up call (or rootSearch after revision bump) hits.
       calculate: function(data) {
         var query = String(data && data.query || "").trim()
+        if (query && backend.ephemeralCalcByQuery[query]) {
+          var row = backend.ephemeralCalcByQuery[query]
+          return {
+            kind: row.calcKind || "math",
+            expression: row.subtitle || query,
+            result: row.title,
+            copyText: row.copyText || row.title,
+            unit: ""
+          }
+        }
         var rates = currencyRates.ratesMap()
         var peeked = calcEngine.peek(query)
         if (peeked !== undefined) return peeked
         calcEngine.evaluate(query, rates)
         return calcEngine.peek(query) === undefined ? null : calcEngine.peek(query)
+      },
+      // Enter on a math query: copy the result without requiring the row id.
+      copyForQuery: function(data) {
+        var query = String(data && data.query || "").trim()
+        if (!query) return null
+        var row = backend.ephemeralCalcByQuery[query]
+        var result = row ? {
+          kind: row.calcKind || "math",
+          copyText: row.copyText || row.title,
+          result: row.title
+        } : calcEngine.peek(query)
+        if (!result || result.kind !== "math") return null
+        return backend.copyCalcText(result.copyText || result.result || "")
       },
       refreshCurrencies: function() { currencyRates.refresh(); return null }
     })
@@ -356,16 +439,36 @@ Item {
         var query = String(data && data.query || "")
         var view = data && data.view
         var ctx = backend.searchContext(query)
+        if (view && view.kind === "files") {
+          fileSource.request(query)
+          var found = fileSource.rowsFor(query, FileSearch.VIEW_LIMIT)
+          return found.length ? [{ id: "files", title: "", rows: found }] : []
+        }
+        if (!view || view.kind === "root") {
+          fileSource.request(query)
+          ctx.files = fileSource.rowsFor(query, FileSearch.ROOT_LIMIT)
+        }
         var sections = view && view.kind === "menu"
           ? RootSearch.submenuSections(backend.candidates, view.menuId, query, ctx, backend.deps)
           : RootSearch.rootSections(backend.candidates, query, ctx, backend.deps)
+        backend.ephemeralCalcById = ({})
+        backend.ephemeralCalcByQuery = ({})
         return sections.map(function(s) {
-          return { id: s.id, title: s.title, rows: s.rows.map(function(r) { return r.candidate }) }
+          return {
+            id: s.id,
+            title: s.title,
+            rows: s.rows.map(function(r) {
+              backend.rememberCalc(query, r.candidate)
+              return r.candidate
+            })
+          }
         })
       },
       getActions: function(data) {
         var rowId = String(data && data.id || "")
         if (rowId.indexOf("calculator:") === 0) return RootSearch.actionsFor({ kind: "calculator" })
+        var file = fileSource.lookup(rowId)
+        if (file) return RootSearch.actionsFor(file)
         var candidate = backend.decorated(rowId)
         if (!candidate) {
           var fallback = RootSearch.FALLBACKS.filter(function(f) { return f.id === data.id })[0]
@@ -381,6 +484,8 @@ Item {
           Util.execArgv(["omarchy-launch-browser", RootSearch.fallbackUrl(fallback, data.query)])
           return { close: true }
         }
+        var file = fileSource.lookup(String(data && data.id || ""))
+        if (file) return backend.performFileAction(file, String(data.action || "open"))
         return backend.performAction(data)
       },
       getSearchHistory: function() { return frecencyStore.loaded ? frecencyStore.doc.searchHistory : [] }
@@ -435,6 +540,12 @@ Item {
     id: menuSource
     onRevisionChanged: rebuildTimer.restart()
     onMessage: function(level, text, metadata) { backend.log(level, "omarchy-menu", text, metadata) }
+  }
+
+  FileSearchSource {
+    id: fileSource
+    onRevisionChanged: backend.candidatesRevision++
+    onMessage: function(level, text, metadata) { backend.log(level, "files", text, metadata) }
   }
 
   JsonStore {

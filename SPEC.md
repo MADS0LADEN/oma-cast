@@ -232,7 +232,7 @@ Common to all DEs: logind (lock/suspend/hibernate/poweroff/reboot), PipeWire `wp
 ## 5. Host responsibilities in detail
 
 ### 5.1 Launcher window [O behaviour]
-- Size **750 × 475** logical px at `uiZoom` 1. Header 66, footer 42. Corner radius 8 (Raycast uses 26 on macOS 26). Transparent window; the page paints `--color-window-bg` = theme background at **40 % alpha**, over compositor blur.
+- Size **750 × 475** logical px at `uiZoom` 1 (the clone makes this the default of the `windowWidth`/`windowHeight` general settings [D]). Header 66, footer 42. Corner radius 8 (Raycast uses 26 on macOS 26). Transparent window; the page paints `--color-window-bg` = theme background at **40 % alpha**, over compositor blur.
 - **Compact mode** (`windowMode: compact`): only the 66 px search bar shows until the user types, then the window grows to full height. Optionally a row of favourite icons.
 - **Show:** pick the monitor (`windowPresentationMode`: `mouse-screen` default / `active-screen` / `primary-screen`), place the window horizontally centred about 1/4 down from the top [I], focus the search field.
   - **Buffer keystrokes** typed between the hotkey and webview focus, then replay them. Raycast does this explicitly [O], and it matters on Wayland where focus is slow.
@@ -745,7 +745,7 @@ Repo layout [D]:
 - Launcher surface (750×475, 66 header, 42 footer) on the active Omarchy theme. It starts hidden and is toggled by `oma-cast toggle`, `omarchy-shell oma-cast toggle` or the global shortcut `oma-cast:toggle` (`oma-cast setup hyprland` binds Alt+Space).
 - In-process backend: method registry with Raycast names, `system.healthPing`, `system.healthDatabase`, `system.info`, `system.getPaths`, `settings.getGeneralSettings` / `updateGeneralSettings`, and notifications. The footer shows a live `system.healthPing` round trip.
 - XDG paths (§6.3), `config.json` (hot reload), logging to the shell log, and versioned JSON stores with a migrations framework.
-- **Accept:** `oma-cast toggle` shows and hides in under 100 ms warm, measured from the CLI call to Hyprland's `openlayer`/`closelayer` event (`tests/smoke.sh`). A backend error or an unreadable store never takes the launcher down: calls answer `{ok:false,error}`, and the store goes read-only without overwriting the file, then recovers when the file is fixed. `node --test tests/` covers the registry, paths, migrations and logging.
+- **Accept:** `oma-cast toggle` shows and hides in under 100 ms warm, measured from the CLI call to Hyprland's `openlayer`/`closelayer` event (`tests/smoke.sh`). A backend error or an unreadable store never takes the launcher down: calls answer `{ok:false,error}`, and the store goes read-only without overwriting the file, then recovers when the file is fixed. `node --test tests/*.test.js` covers the registry, paths, migrations and logging.
 
 ### Phase 0 (original Tauri plan, superseded for Omarchy)
 - Tauri app with a main window. Hidden at start, toggled by `<app> toggle` (D-Bus single instance).

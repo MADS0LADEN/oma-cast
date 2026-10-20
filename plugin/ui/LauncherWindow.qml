@@ -5,9 +5,10 @@ import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
 
-// Launcher surface (SPEC §5.1, §10.2): 750×475 at uiZoom 1, 66 px search
-// header, 42 px footer, centred horizontally about a quarter down the
-// screen, coloured by the active Omarchy theme's [menu] tokens.
+// Launcher surface (SPEC §5.1, §10.2): 750×475 at uiZoom 1 unless the
+// windowWidth/windowHeight settings say otherwise, 66 px search header,
+// 42 px footer, centred horizontally about a quarter down the screen,
+// coloured by the active Omarchy theme's [menu] tokens.
 //
 // Views form a navigation stack: root search, a pushed Omarchy submenu, or
 // the alias editor. Each view keeps its own query.
@@ -25,7 +26,7 @@ OverlayWindow {
   readonly property var general: {
     window.backend.storeRevision
     var r = window.backend.ready ? window.backend.callSync("settings.getGeneralSettings", null) : null
-    return r && r.ok ? r.data : ({ uiZoom: 1, windowMode: "expanded", escapeKeyBehavior: "pop-back-or-close", popToRootTimeout: 90 })
+    return r && r.ok ? r.data : ({ uiZoom: 1, windowMode: "expanded", escapeKeyBehavior: "pop-back-or-close", popToRootTimeout: 90, windowWidth: 750, windowHeight: 475 })
   }
   readonly property real zoom: window.general.uiZoom > 0 ? window.general.uiZoom : 1
   function px(value) { return Math.round(Style.space(value) * window.zoom) }
@@ -42,6 +43,9 @@ OverlayWindow {
   // --------------------------------------------------------------- state
   property var stack: [{ kind: "root", title: "oma-cast", query: "" }]
   readonly property var view: window.stack[window.stack.length - 1]
+  // A part-wheeled notch must not carry into a new view.
+  property int wheelAccumulator: 0
+  onStackChanged: window.wheelAccumulator = 0
   property string query: ""
   property int selectedIndex: -1
   property var selectedRow: null
@@ -49,14 +53,26 @@ OverlayWindow {
   property var actions: []
   property var toast: null
   property int historyIndex: -1
+  // A file row is being dragged out: hide the card and let the pointer pass
+  // through the fullscreen surface, so the app underneath receives the drop.
+  property bool draggingOut: false
+
+  mask: window.draggingOut ? passThrough : null
+  // Hyprland keeps pointer focus on a layer with exclusive keyboard focus,
+  // so the drop would never reach the window underneath; let go while dragging.
+  shownKeyboardFocus: window.draggingOut ? WlrKeyboardFocus.None : WlrKeyboardFocus.Exclusive
+  Region { id: passThrough }
 
   readonly property bool atRoot: window.stack.length === 1
   readonly property bool compact: window.general.windowMode === "compact" && window.atRoot && !window.query
   readonly property string placeholder: window.view.kind === "alias" ? "Type an alias, then press ↵"
-    : (window.view.kind === "menu" ? "Search " + window.view.title + "…" : "Search for apps and commands…")
+    : (window.view.kind === "menu" ? "Search " + window.view.title + "…"
+    : (window.view.kind === "files" ? "Search files and folders…" : "Search for apps, commands and files…"))
 
-  readonly property int cardWidth: Math.min(px(750), width - Style.gapsOut * 2)
-  readonly property int fullHeight: Math.min(px(475), height - Style.gapsOut * 2)
+  // Card size in px at uiZoom 1; zoom scales it with the text, and it never
+  // grows past the screen.
+  readonly property int cardWidth: Math.min(px(window.general.windowWidth > 0 ? window.general.windowWidth : 750), width - Style.gapsOut * 2)
+  readonly property int fullHeight: Math.min(px(window.general.windowHeight > 0 ? window.general.windowHeight : 475), height - Style.gapsOut * 2)
   readonly property int headerHeight: px(66)
   readonly property int footerHeight: px(42)
 
@@ -72,6 +88,7 @@ OverlayWindow {
   // Called on every open, before the surface maps.
   function prepare(payload) {
     popTimer.stop()
+    window.draggingOut = false
     if (typeof payload.query === "string") window.query = payload.query
     window.actionPanelOpen = false
     window.historyIndex = -1
@@ -81,8 +98,12 @@ OverlayWindow {
 
   // The shell hid us: start the pop-to-root clock (SPEC §5.1).
   onShownChanged: {
+    // A drag whose row was destroyed mid-flight never reports its end; never
+    // let that leave the next open invisible and click-through.
+    window.draggingOut = false
     if (window.shown) return
     window.actionPanelOpen = false
+    window.wheelAccumulator = 0
     var seconds = Number(window.general.popToRootTimeout)
     if (!(seconds > 0)) window.popToRoot()
     else { popTimer.interval = seconds * 1000; popTimer.restart() }
@@ -123,7 +144,10 @@ OverlayWindow {
 
   function rebuild(resetSelection) {
     pointerGate.reset()
-    var keepId = !resetSelection && window.selectedRow ? window.selectedRow.itemId : ""
+    // A selection still on the top row follows the top row, so rows that
+    // arrive late (file search) take the top instead of pushing it down.
+    var onTop = window.selectedIndex >= 0 && window.selectedIndex === window.nextSelectable(-1, 1)
+    var keepId = !resetSelection && !onTop && window.selectedRow ? window.selectedRow.itemId : ""
     rows.clear()
     if (window.view.kind === "alias") { window.select(-1); return }
     var result = window.backend.callSync("rootSearch.search", { query: window.query, view: window.view })
@@ -158,7 +182,8 @@ OverlayWindow {
       alias: String(c.alias || ""),
       checked: !!c.checked,
       disabled: !!c.disabled,
-      favorite: typeof c.favoriteOrder === "number"
+      favorite: typeof c.favoriteOrder === "number",
+      path: String(c.path || "")
     }
   }
 
@@ -168,11 +193,40 @@ OverlayWindow {
     return -1
   }
 
-  function select(index) {
+  // fromPointer: a hovered row is already on screen, so leave the scroll
+  // alone (the Omarchy menu doesn't scroll on hover either).
+  function select(index, fromPointer) {
     window.selectedIndex = index
     window.selectedRow = index >= 0 && index < rows.count ? rows.get(index) : null
+    if (fromPointer) return
     if (index >= 0) list.positionViewAtIndex(index, ListView.Contain)
     if (index === window.nextSelectable(-1, 1)) list.positionViewAtBeginning()
+  }
+
+  // One wheel notch moves one result; section titles ride along with the
+  // first row under them instead of eating a notch [D].
+  function wheelRows(steps) {
+    var top = list.indexAt(0, list.contentY + 1)
+    if (top < 0) return
+    var anchor = rows.get(top).rowKind === "item" ? top : window.nextSelectable(top, 1)
+    if (anchor < 0) anchor = window.nextSelectable(top, -1)
+    var target = anchor
+    var dir = steps > 0 ? 1 : -1
+    var todo = Math.abs(steps)
+    // After a touchpad leaves the top row cut off, the first notch up
+    // realigns that row instead of skipping past it.
+    var topItem = list.itemAtIndex(top)
+    if (dir < 0 && topItem && topItem.y < list.contentY - 1) { target = top; todo-- }
+    for (var n = 0; n < todo; n++) {
+      var next = window.nextSelectable(target, dir)
+      if (next < 0) break
+      target = next
+    }
+    if (target === window.nextSelectable(-1, 1)) { list.positionViewAtBeginning(); return }
+    var at = target > 0 && rows.get(target - 1).rowKind !== "item" ? target - 1 : target
+    // Clamps at the end of the list, so extra notches there do nothing,
+    // as in the Omarchy menu.
+    list.positionViewAtIndex(at, ListView.Beginning)
   }
 
   function move(delta) {
@@ -242,6 +296,20 @@ OverlayWindow {
   function performNth(n) {
     var list = window.actionsForSelected()
     if (list.length > n) window.perform(list[n].id)
+  }
+
+  // Copy a ready math result for the current query. Returns true if handled.
+  function copyMathResult() {
+    var r = window.backend.callSync("calculator.copyForQuery", { query: window.query })
+    if (!r.ok || !r.data) return false
+    var outcome = r.data || {}
+    if (outcome.close) {
+      if (outcome.hud) window.hud(outcome.hud)
+      window.dismissRequested()
+      if (window.atRoot) window.setQuery("")
+      return true
+    }
+    return false
   }
 
   function performIfOffered(actionIds) {
@@ -356,7 +424,13 @@ OverlayWindow {
       if (ctrl && key === Qt.Key_K) { window.toggleActionPanel(); return true }
       if (enter && ctrl && shift) { window.performNth(2); return true }
       if (enter && ctrl) { window.performNth(1); return true }
-      if (enter) { window.performNth(0); return true }
+      if (enter) {
+        // Math queries: Enter always copies the result (Raycast-style), even if
+        // selection briefly landed on a fallback while the worker was catching up.
+        if (window.copyMathResult()) return true
+        window.performNth(0)
+        return true
+      }
       if (ctrl && alt && key === Qt.Key_Up) { window.performIfOffered(["favorite-up"]); return true }
       if (ctrl && alt && key === Qt.Key_Down) { window.performIfOffered(["favorite-down"]); return true }
       if (ctrl && key === Qt.Key_Up) { window.jumpSection(-1); return true }
@@ -372,7 +446,7 @@ OverlayWindow {
       if (key === Qt.Key_PageUp) { window.move(-8); return true }
       if (key === Qt.Key_PageDown) { window.move(8); return true }
       if (ctrl && shift && key === Qt.Key_F) { window.performIfOffered(["favorite-add", "favorite-remove"]); return true }
-      if (ctrl && shift && key === Qt.Key_C) { window.performIfOffered(["copy-command", "copy-id"]); return true }
+      if (ctrl && shift && key === Qt.Key_C) { window.performIfOffered(["copy-command", "copy-id", "copy-path"]); return true }
       if (alt && shift && key === Qt.Key_D) { window.performIfOffered(["disable"]); return true }
       if (ctrl && key >= Qt.Key_1 && key <= Qt.Key_9) {
         var target = window.nthItem(key - Qt.Key_0)
@@ -419,6 +493,7 @@ OverlayWindow {
     color: window.look.background
     borderSpec: window.borderSpec
     clip: true
+    opacity: window.draggingOut ? 0 : 1
 
     MouseArea { anchors.fill: parent; onClicked: { window.actionPanelOpen = false; keyCatcher.forceActiveFocus() } }
 
@@ -557,8 +632,36 @@ OverlayWindow {
           zoom: window.zoom
           // Only a real pointer move selects: a row sliding under a still
           // pointer (open, typing, scrolling) must not steal the cursor.
-          onHovered: function(i, item, mouse) { if (!window.actionPanelOpen && pointerGate.moved(item, mouse)) window.select(i) }
+          onHovered: function(i, item, mouse) { if (!window.actionPanelOpen && pointerGate.moved(item, mouse)) window.select(i, true) }
           onClicked: function(i) { window.perform("open", i) }
+          onDragStarted: function(i) { window.select(i); window.actionPanelOpen = false; window.draggingOut = true }
+          // A drop somewhere else is done with the launcher; a cancelled drag brings it back.
+          onDragEnded: function(dropped) {
+            window.draggingOut = false
+            if (dropped) window.dismissRequested()
+          }
+        }
+      }
+
+      // A sibling, not a child: children of a ListView live in its content
+      // item and scroll with it. Mouse wheels step by result; touchpads keep
+      // pixel scrolling [D]. Ignored under the action panel, like hover.
+      MouseArea {
+        anchors.fill: list
+        z: 1
+        enabled: list.visible
+        acceptedButtons: Qt.NoButton
+        onWheel: function(wheel) {
+          // Swallowed, not disabled: a disabled area would let the list scroll.
+          if (window.actionPanelOpen) return
+          if (wheel.pixelDelta.y !== 0) {
+            var bottom = list.originY + Math.max(0, list.contentHeight - list.height)
+            list.contentY = Math.max(list.originY, Math.min(list.contentY - wheel.pixelDelta.y, bottom))
+            return
+          }
+          var r = Util.wheelSteps(window.wheelAccumulator, wheel.angleDelta.y)
+          window.wheelAccumulator = r.remainder
+          if (r.steps !== 0) window.wheelRows(-r.steps)
         }
       }
 
@@ -580,7 +683,9 @@ OverlayWindow {
           anchors.horizontalCenter: parent.horizontalCenter
           textFormat: Text.PlainText
           text: window.view.kind === "alias" ? window.view.title
-            : (window.backend.ready ? "No results" : "Loading…")
+            : (!window.backend.ready ? "Loading…"
+            : (window.view.kind !== "files" ? "No results"
+            : (window.query.trim().length < 2 ? "Search your home folder" : (window.backend.loading ? "Searching…" : "No files found"))))
           color: window.look.foreground
           font.family: window.look.fontFamily
           font.pixelSize: Math.round(Style.font.title * window.zoom)
