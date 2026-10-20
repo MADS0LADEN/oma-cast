@@ -38,7 +38,8 @@ Launcher
   call <method> [json]   Call a backend method, e.g. oma-cast call system.info
 
 Setup
-  install                Link the plugin into omarchy-shell, enable it, and link this CLI into ~/.local/bin
+  install                Build the Rust calc helper, link the plugin + CLIs, enable in omarchy-shell
+  build-calc             cargo build --release the oma-cast-calc helper and link it into ~/.local/bin
   uninstall              Disable and unlink the plugin
   reload                 Make the shell reload the plugin after editing it
   dev                    Reload the plugin on every save under plugin/
@@ -55,9 +56,22 @@ need_shell() {
   command -v omarchy-shell >/dev/null || die "omarchy-shell not found; oma-cast runs inside the Omarchy shell"
 }
 
+cmd_build_calc() {
+  command -v cargo >/dev/null || die "cargo not found; install Rust (e.g. mise use -g rust@stable)"
+  local crate="$repo/native/oma-cast-calc"
+  [[ -f $crate/Cargo.toml ]] || die "missing $crate"
+  (cd "$crate" && cargo build --release) || die "cargo build --release failed"
+  local bin="$crate/target/release/oma-cast-calc"
+  [[ -x $bin ]] || die "binary missing at $bin"
+  mkdir -p "$HOME/.local/bin"
+  ln -sfn "$bin" "$HOME/.local/bin/oma-cast-calc"
+  echo "linked ~/.local/bin/oma-cast-calc -> $bin"
+}
+
 cmd_install() {
   need_shell
   [[ -f $plugin_src/manifest.json ]] || die "plugin source missing at $plugin_src"
+  cmd_build_calc
   mkdir -p "$plugins_dir"
   if [[ -e $plugin_link && ! -L $plugin_link ]]; then
     die "$plugin_link exists and is not a symlink; move it away first"
@@ -98,6 +112,11 @@ cmd_uninstall() {
   omarchy-shell -q shell rescanPlugins
   if [[ -L $HOME/.local/bin/oma-cast && $(readlink -f "$HOME/.local/bin/oma-cast") == "$self" ]]; then
     rm "$HOME/.local/bin/oma-cast" && echo "removed ~/.local/bin/oma-cast"
+  fi
+  local calc_link="$HOME/.local/bin/oma-cast-calc"
+  local calc_bin="$repo/native/oma-cast-calc/target/release/oma-cast-calc"
+  if [[ -L $calc_link && $(readlink -f "$calc_link") == "$(readlink -f "$calc_bin")" ]]; then
+    rm "$calc_link" && echo "removed ~/.local/bin/oma-cast-calc"
   fi
 }
 
@@ -172,6 +191,7 @@ cmd_doctor() {
   check "plugin is enabled" bash -c "omarchy plugin list --json 2>/dev/null | grep -q '\"id\":\"$PLUGIN_ID\"[^}]*\"enabled\":true'"
   check "plugin answers IPC" bash -c "[[ \$(omarchy-shell $IPC_TARGET ping) == ok ]]"
   check "backend answers system.healthPing" bash -c "omarchy-shell $IPC_TARGET call system.healthPing '{}' | grep -q '\"ok\":true'"
+  check "oma-cast-calc is on PATH" bash -c "command -v oma-cast-calc >/dev/null && oma-cast-calc eval '{\"query\":\"1+1\",\"rates\":{}}' | grep -q '\"result\":\"2\"'"
   if [[ -f $hypr_dir/oma-cast.lua ]]; then
     printf '  ok    hotkey file %s\n' "$hypr_dir/oma-cast.lua"
   else
@@ -180,12 +200,33 @@ cmd_doctor() {
   return $bad
 }
 
+cmd_call() {
+  local method=${1:-} payload=${2:-}
+  [[ -n $method ]] || die "usage: oma-cast call <method> [json]"
+  # Sync path for the Rust calculator (avoids the async worker cache race).
+  if [[ $method == calculator.calculate ]]; then
+    command -v oma-cast-calc >/dev/null || die "oma-cast-calc not found; run: oma-cast build-calc"
+    local rates="{}"
+    if [[ -f ${XDG_DATA_HOME:-$HOME/.local/share}/oma-cast/db/currencies.json ]]; then
+      rates=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(d.get("rates") or {"USD":1}))' \
+        "${XDG_DATA_HOME:-$HOME/.local/share}/oma-cast/db/currencies.json" 2>/dev/null || echo '{}')
+    fi
+    local query
+    query=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1] or "{}").get("query",""))' "$payload")
+    oma-cast-calc eval "$(python3 -c 'import json,sys; print(json.dumps({"query":sys.argv[1],"rates":json.loads(sys.argv[2])}))' "$query" "$rates")"
+    return
+  fi
+  need_shell
+  ipc call "$method" "$payload"
+}
+
 case "${1:-}" in
   toggle|show|hide) need_shell; ipc "$1" >/dev/null ;;
   run) need_shell; [[ -n ${2:-} ]] || die "usage: oma-cast run <commandId>"; ipc run "$2" ;;
-  call) need_shell; [[ -n ${2:-} ]] || die "usage: oma-cast call <method> [json]"; ipc call "$2" "${3:-}" ;;
+  call) shift; cmd_call "$@" ;;
   ping) need_shell; ipc ping ;;
   install) cmd_install ;;
+  build-calc) cmd_build_calc ;;
   uninstall) cmd_uninstall ;;
   reload) cmd_reload ;;
   dev) cmd_dev ;;

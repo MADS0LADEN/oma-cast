@@ -1,0 +1,3 @@
+native/oma-cast-calc/target/
+**/*.rs.bk
+.DS_Store

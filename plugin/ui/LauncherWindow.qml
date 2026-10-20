@@ -398,6 +398,7 @@ OverlayWindow {
     target: window.backend
     function onCandidatesRevisionChanged() { if (window.shown && !window.actionPanelOpen) window.rebuild(false) }
     function onCurrencyRatesRevisionChanged() { if (window.shown && !window.actionPanelOpen) window.rebuild(false) }
+    function onCalcRevisionChanged() { if (window.shown && !window.actionPanelOpen) window.rebuild(false) }
   }
 
   // ================================================================== UI

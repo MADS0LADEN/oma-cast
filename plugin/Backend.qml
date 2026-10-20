@@ -94,26 +94,36 @@ Item {
     onTriggered: backend.rebuildCandidates()
   }
 
-  function searchContext() {
-    return {
+  function searchContext(query) {
+    var q = String(query || "").trim()
+    var rates = currencyRates.ratesMap()
+    if (q) calcEngine.evaluate(q, rates)
+    var ctx = {
       commands: settingsStore.loaded ? settingsStore.doc.commands : ({}),
       frecency: frecencyStore.loaded ? frecencyStore.doc.items : ({}),
       nowMs: Date.now(),
       sensitivity: settingsStore.loaded ? settingsStore.doc.general.rootSearchSensitivity : "medium",
-      currencyRates: currencyRates.ratesMap()
+      currencyRates: rates
     }
+    // Always set when searching so RootSearch does not call the Node-only JS bridge.
+    // undefined = in flight; null = not a calc query; object = result.
+    if (q) ctx.calcResult = calcEngine.peek(q)
+    return ctx
   }
 
   function calculatorEval(data) {
     var id = String(data && data.id || "")
     if (id.indexOf("calculator:") !== 0) return null
     var query = String(data && data.query || "").trim()
-    return Calculator.tryEvaluate(query, currencyRates.ratesMap())
+    var peeked = calcEngine.peek(query)
+    if (peeked !== undefined) return peeked
+    calcEngine.evaluate(query, currencyRates.ratesMap())
+    return calcEngine.peek(query) || null
   }
 
   function decorated(id) {
     var c = backend.candidatesById[id]
-    return c ? RootSearch.decorate(c, backend.searchContext(), backend.deps) : null
+    return c ? RootSearch.decorate(c, backend.searchContext(""), backend.deps) : null
   }
 
   // ------------------------------------------------------------- execution
@@ -327,8 +337,15 @@ Item {
     })
 
     Rpc.register(backend.registry, "calculator", {
+      // Returns the Rust worker cache. If cold, kicks evaluate and may return
+      // null once; a follow-up call (or rootSearch after revision bump) hits.
       calculate: function(data) {
-        return Calculator.tryEvaluate(String(data && data.query || ""), currencyRates.ratesMap())
+        var query = String(data && data.query || "").trim()
+        var rates = currencyRates.ratesMap()
+        var peeked = calcEngine.peek(query)
+        if (peeked !== undefined) return peeked
+        calcEngine.evaluate(query, rates)
+        return calcEngine.peek(query) === undefined ? null : calcEngine.peek(query)
       },
       refreshCurrencies: function() { currencyRates.refresh(); return null }
     })
@@ -338,7 +355,7 @@ Item {
       search: function(data) {
         var query = String(data && data.query || "")
         var view = data && data.view
-        var ctx = backend.searchContext()
+        var ctx = backend.searchContext(query)
         var sections = view && view.kind === "menu"
           ? RootSearch.submenuSections(backend.candidates, view.menuId, query, ctx, backend.deps)
           : RootSearch.rootSections(backend.candidates, query, ctx, backend.deps)
@@ -443,13 +460,26 @@ Item {
     onMessage: function(level, text, metadata) { backend.log(level, "currencies", text, metadata) }
   }
 
+  CalculatorEngine {
+    id: calcEngine
+    onMessage: function(level, text, metadata) { backend.log(level, "calculator", text, metadata) }
+  }
+
   // Bumped whenever ranking inputs change, so views re-query.
-  readonly property int dataRevision: candidatesRevision + (settingsStore.loaded ? 1 : 0) + (frecencyStore.loaded ? 1 : 0) + currencyRatesRevision
+  readonly property int dataRevision: candidatesRevision + (settingsStore.loaded ? 1 : 0) + (frecencyStore.loaded ? 1 : 0) + currencyRatesRevision + calcRevision
   property int storeRevision: 0
   property int currencyRatesRevision: 0
+  property int calcRevision: 0
   Connections { target: settingsStore; function onChanged() { backend.storeRevision++ } }
   Connections { target: frecencyStore; function onChanged() { backend.storeRevision++ } }
-  Connections { target: currencyRates; function onChanged() { backend.currencyRatesRevision++ } }
+  Connections {
+    target: currencyRates
+    function onChanged() {
+      calcEngine.invalidate()
+      backend.currencyRatesRevision++
+    }
+  }
+  Connections { target: calcEngine; function onRevisionChanged() { backend.calcRevision = calcEngine.revision } }
 
   // config.json is optional and hand-edited; it hot-reloads on save.
   FileView {

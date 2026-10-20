@@ -155,9 +155,19 @@ function calculatorCandidate(evalResult) {
 
 function calculatorSection(query, ctx, deps) {
   var q = String(query || "").trim()
-  if (!q || !deps.Calculator) return null
-  var rates = (ctx && ctx.currencyRates) || {}
-  var evalResult = deps.Calculator.tryEvaluate(q, rates)
+  if (!q) return null
+  // Live shell: Backend always sets ctx.calcResult from the Rust worker
+  // (undefined = still computing, null = not a calc). Node tests omit the
+  // key and call deps.Calculator.tryEvaluate (sync oma-cast-calc eval).
+  var evalResult
+  if (ctx && Object.prototype.hasOwnProperty.call(ctx, "calcResult")) {
+    if (ctx.calcResult === undefined) return null
+    evalResult = ctx.calcResult
+  } else if (deps && deps.Calculator) {
+    evalResult = deps.Calculator.tryEvaluate(q, (ctx && ctx.currencyRates) || {})
+  } else {
+    return null
+  }
   if (!evalResult) return null
   return {
     id: "calculator",
