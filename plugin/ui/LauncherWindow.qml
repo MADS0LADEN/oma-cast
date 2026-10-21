@@ -654,16 +654,22 @@ OverlayWindow {
         onWheel: function(wheel) {
           // Swallowed, not disabled: a disabled area would let the list scroll.
           if (window.actionPanelOpen) return
-          if (wheel.pixelDelta.y !== 0) {
-            var bottom = list.originY + Math.max(0, list.contentHeight - list.height)
-            list.contentY = Math.max(list.originY, Math.min(list.contentY - wheel.pixelDelta.y, bottom))
+          // Step by rows only for a real wheel turn (NoScrollPhase): whole
+          // notches, or a hi-res wheel that reports no pixels. Qt also gives
+          // notched wheels a pixelDelta (15 px per notch), so pixelDelta alone
+          // can't spot a touchpad. Everything else scrolls by pixels, and
+          // angle-only events mid-gesture are dropped so a touchpad never
+          // snaps to a row [D].
+          var angle = wheel.angleDelta.y
+          var stepRows = wheel.phase === Qt.NoScrollPhase && angle !== 0
+            && (angle % 120 === 0 || wheel.pixelDelta.y === 0)
+          if (!stepRows) {
+            if (wheel.pixelDelta.y !== 0) {
+              var bottom = list.originY + Math.max(0, list.contentHeight - list.height)
+              list.contentY = Math.max(list.originY, Math.min(list.contentY - wheel.pixelDelta.y, bottom))
+            }
             return
           }
-          // Only a real wheel steps by rows. A touchpad gesture (any phase but
-          // NoScrollPhase) can emit angle-only events mid-scroll; stepping on
-          // those would snap the list to a row boundary, which Raycast's
-          // trackpad scrolling never does.
-          if (wheel.phase !== Qt.NoScrollPhase) return
           var r = Util.wheelSteps(window.wheelAccumulator, wheel.angleDelta.y)
           window.wheelAccumulator = r.remainder
           if (r.steps !== 0) window.wheelRows(-r.steps)
